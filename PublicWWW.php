@@ -15,7 +15,9 @@
  *   php PublicWWW.php search '"angular.min.js"' 20
  *   php PublicWWW.php export '"angular.min.js"' > sites.txt
  *   php PublicWWW.php cluster-create --query '"googletagmanager.com/gtm.js"'
+ *   php PublicWWW.php cluster-create --query 'like:"online course" site:de' --limit 100
  *   php PublicWWW.php extract 12 --presets email,phone > contacts.csv
+ *   php PublicWWW.php signatures 12
  */
 
 namespace PublicWWW;
@@ -32,7 +34,7 @@ class Error extends \Exception {
 }
 
 class Client {
-	const USER_AGENT = "publicwww-api-php/1.1";
+	const USER_AGENT = "publicwww-api-php/1.2";
 
 	private $key;
 	private $api;
@@ -151,9 +153,15 @@ class Client {
 		}
 	}
 
-	/** A new cluster from a search; costs one search, like search(). 409 cluster_limit when the account has 100. */
-	public function createCluster ($query, $name = null) {
-		return $this->json ("/v1/clusters", array (), array ("query" => $query) + ($name ? array ("name" => $name) : array ()));
+	/**
+	 * A new cluster from a search; costs one search, like search(). $limit takes
+	 * only the first N results, in the search's own order: pass it with like:,
+	 * or the cluster takes the plan's maximum. 409 cluster_limit when the
+	 * account has 100.
+	 */
+	public function createCluster ($query, $name = null, $limit = null) {
+		return $this->json ("/v1/clusters", array (), array ("query" => $query)
+			+ ($name ? array ("name" => $name) : array ()) + ($limit ? array ("limit" => (int) $limit) : array ()));
 	}
 
 	/** A new cluster from a list of domains or urls; only sites in the index are kept. */
@@ -190,6 +198,29 @@ class Client {
 	}
 
 	/**
+	 * One part of an extraction as CSV: csv (the text), next_offset (null when
+	 * the cluster is done), points_left. $delimiter is a comma by default;
+	 * $header adds a first line with the column names. Costs extraction points.
+	 */
+	public function extractCsv ($id, array $presets = array (), array $regex = array (), $offset = 0, $limit = 1000, $skipEmpty = true, $delimiter = null, $header = false) {
+		$fp = $this->open ("/v1/clusters/" . (int) $id . "/extract", array (), array (
+			"presets" => array_values ($presets), "regex" => array_values ($regex),
+			"offset" => (int) $offset, "limit" => (int) $limit, "skip_empty" => (bool) $skipEmpty,
+			"format" => "csv", "header" => (bool) $header,
+		) + ($delimiter !== null ? array ("delimiter" => $delimiter) : array ()));
+		$meta = stream_get_meta_data ($fp);
+		$next = null;
+		$left = 0;
+		foreach ((array) $meta ["wrapper_data"] as $h) {
+			if (preg_match ('|^X-Next-Offset:\s*(\d+)|i', $h, $m)) $next = (int) $m [1];
+			if (preg_match ('|^X-Points-Left:\s*(\d+)|i', $h, $m)) $left = (int) $m [1];
+		}
+		$csv = stream_get_contents ($fp);
+		fclose ($fp);
+		return array ("csv" => $csv, "next_offset" => $next, "points_left" => $left);
+	}
+
+	/**
 	 * Every row of an extraction over the whole cluster from $offset on, part
 	 * after part (following next_offset). $meta receives the last part's
 	 * numbers (regex, points_left, ...). If the day's extraction points run
@@ -206,6 +237,15 @@ class Client {
 				throw new Error (429, "extract_quota_exceeded", "the day's extraction points ran out; resume with offset=" . $part ["next_offset"]);
 			$offset = $part ["next_offset"];
 		}
+	}
+
+	/**
+	 * Code the cluster's websites share, as ready searches for more like them:
+	 * signatures (query, in_cluster, websites, websites_max, technology),
+	 * domains_used, websites_with_code. Spends nothing.
+	 */
+	public function signatures ($id) {
+		return $this->json ("/v1/clusters/" . (int) $id . "/signatures");
 	}
 
 	public function renameCluster ($id, $name) {
@@ -233,14 +273,16 @@ if (PHP_SAPI === "cli" && isset ($argv [0]) && realpath ($argv [0]) === __FILE__
 	}
 	$name = isset ($opt ["name"]) ? $opt ["name"] : null;
 	$line = function ($c) { return $c ["id"] . "\t" . $c ["size"] . "\t" . $c ["created"] . "\t" . $c ["name"] . "\n"; };
+	$note = function ($res) { if (!empty ($res ["query_note"])) fwrite (STDERR, "note: " . $res ["query_note"] . "\n"); };
 	try {
 		$pw = new Client ();
 		if ($cmd === "account") {
 			echo json_encode ($pw->account (), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
 		} elseif ($cmd === "search" && $query !== "") {
 			$page = $pw->search ($query, 1, isset ($argv [3]) ? (int) $argv [3] : 20);
-			echo $page ["total"], " sites match, page ", $page ["page"], " of ", $page ["total_pages"],
+			echo empty ($page ["total_capped"]) ? "" : "more than ", $page ["total"], " sites match, page ", $page ["page"], " of ", $page ["total_pages"],
 				$page ["truncated"] ? " (cut short by the plan)" : "", "\n";
+			$note ($page);
 			foreach ($page ["results"] as $r) echo $r ["rank"], "\t", $r ["domain"], "\t", $r ["url"], "\n";
 		} elseif ($cmd === "export" && $query !== "") {
 			$meta = null;
@@ -253,7 +295,9 @@ if (PHP_SAPI === "cli" && isset ($argv [0]) && realpath ($argv [0]) === __FILE__
 		} elseif ($cmd === "cluster" && isset ($pos [0])) {
 			foreach ($pw->iterCluster ($pos [0]) as $d) echo $d, "\n";
 		} elseif ($cmd === "cluster-create" && isset ($opt ["query"])) {
-			echo $line ($pw->createCluster ($opt ["query"], $name));
+			$c = $pw->createCluster ($opt ["query"], $name, isset ($opt ["limit"]) ? (int) $opt ["limit"] : null);
+			echo $line ($c);
+			$note ($c);
 		} elseif ($cmd === "cluster-create" && isset ($opt ["domains-file"])) {
 			$f = $opt ["domains-file"] === "-" ? "php://stdin" : $opt ["domains-file"];
 			$text = @file_get_contents ($f);
@@ -267,16 +311,24 @@ if (PHP_SAPI === "cli" && isset ($argv [0]) && realpath ($argv [0]) === __FILE__
 		} elseif ($cmd === "extract" && isset ($pos [0])) {
 			$presets = array_values (array_filter (array_map ("trim", explode (",", isset ($opt ["presets"]) ? $opt ["presets"] : "")), "strlen"));
 			$offset  = isset ($opt ["offset"]) ? (int) $opt ["offset"] : 0;
-			if ($offset === 0) fputcsv (STDOUT, array_merge (array ("domain"), $presets, $opt ["regex"]), ",", "\"", "");
-			$meta = null;
-			$n = 0;
-			foreach ($pw->iterExtract ($pos [0], $presets, $opt ["regex"], $meta, $offset) as $r) {
-				$cells = array ($r ["domain"]);
-				foreach ($r ["values"] as $v) $cells []= join ("\n", $v);
-				fputcsv (STDOUT, $cells, ",", "\"", "");
-				$n ++;
+			$delimiter = isset ($opt ["delimiter"]) ? $opt ["delimiter"] : null;
+			while ($offset !== null) {
+				$part = $pw->extractCsv ($pos [0], $presets, $opt ["regex"], $offset, 1000, true, $delimiter, $offset === 0);
+				echo $part ["csv"];
+				$offset = $part ["next_offset"];
+				if ($offset !== null && $part ["points_left"] <= 0) {
+					fwrite (STDERR, "the day's extraction points ran out; resume with --offset $offset\n");
+					exit (1);
+				}
 			}
-			fwrite (STDERR, "$n sites with matches, {$meta ["points_left"]} extraction points left\n");
+			fwrite (STDERR, $part ["points_left"] . " extraction points left\n");
+		} elseif ($cmd === "signatures" && isset ($pos [0])) {
+			$res = $pw->signatures ($pos [0]);
+			foreach ($res ["signatures"] as $s) {
+				$websites = $s ["websites"] !== null ? $s ["websites"] : "<" . $s ["websites_max"];
+				echo $s ["query"], "\t", $s ["in_cluster"], "\t", $websites, "\t", isset ($s ["technology"]) ? $s ["technology"] : "", "\n";
+			}
+			if (!empty ($res ["note"])) fwrite (STDERR, "note: " . $res ["note"] . "\n");
 		} elseif ($cmd === "cluster-rename" && count ($pos) >= 2) {
 			echo $line ($pw->renameCluster ($pos [0], $pos [1]));
 		} elseif ($cmd === "cluster-delete" && isset ($pos [0])) {
@@ -284,9 +336,10 @@ if (PHP_SAPI === "cli" && isset ($argv [0]) && realpath ($argv [0]) === __FILE__
 			echo "deleted ", $res ["deleted"], "\t", $res ["name"], "\n";
 		} else {
 			fwrite (STDERR, "usage: php PublicWWW.php account | search QUERY [PER_PAGE] | export QUERY\n"
-				. "       | clusters | cluster ID | cluster-create (--query Q | --domains-file F) [--name N]\n"
+				. "       | clusters | cluster ID | cluster-create (--query Q [--limit N] | --domains-file F) [--name N]\n"
 				. "       | cluster-combine and|or|diff ID ID... [--name N] | presets\n"
-				. "       | extract ID [--presets a,b] [--regex R]... [--offset N] | cluster-rename ID NAME | cluster-delete ID\n");
+				. "       | extract ID [--presets a,b] [--regex R]... [--offset N] [--delimiter C] | signatures ID\n"
+				. "       | cluster-rename ID NAME | cluster-delete ID\n");
 			exit (2);
 		}
 	} catch (Error $e) {

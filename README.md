@@ -52,7 +52,10 @@ pull values out of their page source or to combine with other clusters. See
 
 ```sh
 php PublicWWW.php cluster-create --query '"googletagmanager.com/gtm.js"'   # prints id, size, created, name
+php PublicWWW.php cluster-create --query 'like:"online course" site:de' --limit 100   # sites about a topic; like: removes nothing, so pass --limit
 php PublicWWW.php extract 12 --presets email,phone > contacts.csv          # the whole cluster, part after part
+php PublicWWW.php extract 12 --presets email --delimiter ';' > emails.csv
+php PublicWWW.php signatures 12    # code the sites share, as searches for more like them
 php PublicWWW.php extract 12 --regex '/data-site-id="([0-9]+)"/i' > ids.csv
 php PublicWWW.php cluster-combine diff 14 12 --name "new this month"       # also: and, or
 php PublicWWW.php clusters      # and: cluster ID, presets, cluster-rename ID NAME, cluster-delete ID
@@ -61,6 +64,7 @@ php PublicWWW.php clusters      # and: cluster ID, presets, cluster-rename ID NA
 ```php
 $gtm  = $pw->createCluster ('"googletagmanager.com/gtm.js"');          // costs one search
 $mine = $pw->createClusterFromDomains (array ("example.com", "https://example.org/"), "mine");
+$topic = $pw->createCluster ('like:"online course" site:de', null, 100);   // the first 100 by similarity
 
 // Every site, in parts of up to 1000 (following next_offset); spends extraction points.
 foreach ($pw->iterExtract ($gtm ["id"], array ("email", "phone")) as $row) {
