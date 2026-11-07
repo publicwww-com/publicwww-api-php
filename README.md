@@ -1,7 +1,7 @@
 # PublicWWW API - PHP
 
 A small client for the [PublicWWW API](https://publicwww.com/docs/api/): search the
-source code (HTML, JavaScript, CSS) of hundreds of millions of websites from your
+source code (HTML, JavaScript, CSS) of web pages from your
 own code. One file, PHP 7.4+, no extensions beyond openssl and json.
 
 ## Setup
